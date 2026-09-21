@@ -1,9 +1,11 @@
 """
 BatteryChime - NVDA Battery Warning Addon
 Author: Leo
-Version: 1.0.0
+Version: 1.1.0
 
-Plays custom sounds when battery reaches low, critical, and emergency levels.
+Plays custom sounds when battery reaches low, critical, and emergency
+levels, and when the charger is plugged in, unplugged, or the battery
+becomes fully charged.
 """
 
 import globalPluginHandler
@@ -37,6 +39,22 @@ confspec = {
     "emergencyPackSound": "string(default='horror')",
     "emergencyCustomPath": "string(default='')",
 
+    "pluggedInEnabled": "boolean(default=True)",
+    "pluggedInMode": "string(default='pack')",
+    "pluggedInPackSound": "string(default='plugin1')",
+    "pluggedInCustomPath": "string(default='')",
+
+    "unpluggedEnabled": "boolean(default=True)",
+    "unpluggedMode": "string(default='pack')",
+    "unpluggedPackSound": "string(default='unplug')",
+    "unpluggedCustomPath": "string(default='')",
+
+    "fullyChargedEnabled": "boolean(default=True)",
+    "fullyChargedPercent": "integer(default=100, min=90, max=100)",
+    "fullyChargedMode": "string(default='pack')",
+    "fullyChargedPackSound": "string(default='charged1')",
+    "fullyChargedCustomPath": "string(default='')",
+
     "checkInterval": "integer(default=60, min=10, max=300)",
 }
 config.conf.spec["BatteryChime"] = confspec
@@ -48,6 +66,13 @@ SOUND_PACK = {
     "dramatic": "Dramatic Hit",
     "horror": "Horror Sting",
     "chill": "Chill Tone",
+    "plugin1": "Network Connect",
+    "plugin2": "Pairing Success",
+    "plugin3": "Confirm Ping",
+    "plugin4": "Triple Ping",
+    "charged1": "Achievement Unlocked",
+    "charged2": "Victory Fanfare",
+    "unplug": "Quick Shimmer",
 }
 
 
@@ -101,6 +126,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         super().__init__(*args, **kwargs)
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(BatteryChimeSettingsPanel)
         self._alerted = set()
+        self._wasCharging = None
+        self._fullyChargedAlerted = False
         self._running = True
         self._thread = threading.Thread(target=self._monitorBattery, daemon=True)
         self._thread.start()
@@ -109,8 +136,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         while self._running:
             try:
                 percent, is_charging = get_battery_percent()
-                if percent is not None and not is_charging:
-                    self._checkLevel(percent)
+                if percent is not None:
+                    if is_charging:
+                        self._checkFullyCharged(percent)
+                    else:
+                        self._checkLevel(percent)
+                        self._fullyChargedAlerted = False
+                    self._checkChargingTransition(is_charging)
             except Exception:
                 pass
             interval = config.conf["BatteryChime"]["checkInterval"]
@@ -138,6 +170,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             if percent > threshold + 2 and level_name in self._alerted:
                 self._alerted.discard(level_name)
 
+    def _checkChargingTransition(self, is_charging):
+        # Skip the first observation -- it's the starting state, not a transition.
+        if self._wasCharging is None:
+            self._wasCharging = is_charging
+            return
+        if is_charging and not self._wasCharging:
+            if config.conf["BatteryChime"]["pluggedInEnabled"]:
+                self._playLevelSound("pluggedIn")
+        elif not is_charging and self._wasCharging:
+            if config.conf["BatteryChime"]["unpluggedEnabled"]:
+                self._playLevelSound("unplugged")
+        self._wasCharging = is_charging
+
+    def _checkFullyCharged(self, percent):
+        threshold = config.conf["BatteryChime"]["fullyChargedPercent"]
+        if (
+            config.conf["BatteryChime"]["fullyChargedEnabled"]
+            and percent >= threshold
+            and not self._fullyChargedAlerted
+        ):
+            self._fullyChargedAlerted = True
+            self._playLevelSound("fullyCharged")
+
     def _playLevelSound(self, level):
         mode = config.conf["BatteryChime"][f"{level}Mode"]
         pack_key = config.conf["BatteryChime"][f"{level}PackSound"]
@@ -163,6 +218,7 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
     def makeSettings(self, sizer):
         helper = gui.guiHelper.BoxSizerHelper(self, sizer=sizer)
         packIds = list(SOUND_PACK.keys())
+        modeMap = {"pack": 0, "custom": 1, "disabled": 2}
 
         # ── LOW BATTERY ──
         helper.addItem(wx.StaticText(self, label="Low Battery Warning"))
@@ -173,8 +229,7 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.lowPercent = helper.addLabeledControl("Warn at percentage:", wx.SpinCtrl, min=5, max=95, initial=config.conf["BatteryChime"]["lowPercent"])
 
         self.lowMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
-        lowModeMap = {"pack": 0, "custom": 1, "disabled": 2}
-        self.lowMode.SetSelection(lowModeMap.get(config.conf["BatteryChime"]["lowMode"], 0))
+        self.lowMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["lowMode"], 0))
 
         self.lowPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
         currentLow = config.conf["BatteryChime"]["lowPackSound"]
@@ -200,7 +255,7 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.criticalPercent = helper.addLabeledControl("Warn at percentage:", wx.SpinCtrl, min=2, max=30, initial=config.conf["BatteryChime"]["criticalPercent"])
 
         self.criticalMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
-        self.criticalMode.SetSelection(lowModeMap.get(config.conf["BatteryChime"]["criticalMode"], 0))
+        self.criticalMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["criticalMode"], 0))
 
         self.criticalPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
         currentCritical = config.conf["BatteryChime"]["criticalPackSound"]
@@ -226,7 +281,7 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
         self.emergencyPercent = helper.addLabeledControl("Warn at percentage:", wx.SpinCtrl, min=1, max=15, initial=config.conf["BatteryChime"]["emergencyPercent"])
 
         self.emergencyMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
-        self.emergencyMode.SetSelection(lowModeMap.get(config.conf["BatteryChime"]["emergencyMode"], 0))
+        self.emergencyMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["emergencyMode"], 0))
 
         self.emergencyPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
         currentEmergency = config.conf["BatteryChime"]["emergencyPackSound"]
@@ -242,6 +297,80 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
         self.emergencyPreview = helper.addItem(wx.Button(self, label="Test Emergency Warning"))
         self.emergencyPreview.Bind(wx.EVT_BUTTON, lambda e: self._testLevel("emergency"))
+
+        # ── PLUGGED IN ──
+        helper.addItem(wx.StaticText(self, label="Charger Plugged In"))
+
+        self.pluggedInEnabled = helper.addItem(wx.CheckBox(self, label="Enable plugged in sound"))
+        self.pluggedInEnabled.SetValue(config.conf["BatteryChime"]["pluggedInEnabled"])
+
+        self.pluggedInMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
+        self.pluggedInMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["pluggedInMode"], 0))
+
+        self.pluggedInPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
+        currentPluggedIn = config.conf["BatteryChime"]["pluggedInPackSound"]
+        self.pluggedInPackSound.SetSelection(packIds.index(currentPluggedIn) if currentPluggedIn in packIds else 0)
+
+        pluggedInCustomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.pluggedInCustomPath = wx.TextCtrl(self, value=config.conf["BatteryChime"]["pluggedInCustomPath"])
+        pluggedInCustomSizer.Add(self.pluggedInCustomPath, proportion=1)
+        self.pluggedInBrowse = wx.Button(self, label="Browse...")
+        self.pluggedInBrowse.Bind(wx.EVT_BUTTON, lambda e: self._onBrowse(self.pluggedInCustomPath))
+        pluggedInCustomSizer.Add(self.pluggedInBrowse)
+        helper.addItem(pluggedInCustomSizer)
+
+        self.pluggedInPreview = helper.addItem(wx.Button(self, label="Test Plugged In Sound"))
+        self.pluggedInPreview.Bind(wx.EVT_BUTTON, lambda e: self._testLevel("pluggedIn"))
+
+        # ── UNPLUGGED ──
+        helper.addItem(wx.StaticText(self, label="Charger Unplugged"))
+
+        self.unpluggedEnabled = helper.addItem(wx.CheckBox(self, label="Enable unplugged sound"))
+        self.unpluggedEnabled.SetValue(config.conf["BatteryChime"]["unpluggedEnabled"])
+
+        self.unpluggedMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
+        self.unpluggedMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["unpluggedMode"], 0))
+
+        self.unpluggedPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
+        currentUnplugged = config.conf["BatteryChime"]["unpluggedPackSound"]
+        self.unpluggedPackSound.SetSelection(packIds.index(currentUnplugged) if currentUnplugged in packIds else 0)
+
+        unpluggedCustomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.unpluggedCustomPath = wx.TextCtrl(self, value=config.conf["BatteryChime"]["unpluggedCustomPath"])
+        unpluggedCustomSizer.Add(self.unpluggedCustomPath, proportion=1)
+        self.unpluggedBrowse = wx.Button(self, label="Browse...")
+        self.unpluggedBrowse.Bind(wx.EVT_BUTTON, lambda e: self._onBrowse(self.unpluggedCustomPath))
+        unpluggedCustomSizer.Add(self.unpluggedBrowse)
+        helper.addItem(unpluggedCustomSizer)
+
+        self.unpluggedPreview = helper.addItem(wx.Button(self, label="Test Unplugged Sound"))
+        self.unpluggedPreview.Bind(wx.EVT_BUTTON, lambda e: self._testLevel("unplugged"))
+
+        # ── FULLY CHARGED ──
+        helper.addItem(wx.StaticText(self, label="Fully Charged"))
+
+        self.fullyChargedEnabled = helper.addItem(wx.CheckBox(self, label="Enable fully charged sound"))
+        self.fullyChargedEnabled.SetValue(config.conf["BatteryChime"]["fullyChargedEnabled"])
+
+        self.fullyChargedPercent = helper.addLabeledControl("Consider fully charged at percentage:", wx.SpinCtrl, min=90, max=100, initial=config.conf["BatteryChime"]["fullyChargedPercent"])
+
+        self.fullyChargedMode = helper.addLabeledControl("Sound mode:", wx.Choice, choices=["Pack sound", "Custom WAV", "Disabled"])
+        self.fullyChargedMode.SetSelection(modeMap.get(config.conf["BatteryChime"]["fullyChargedMode"], 0))
+
+        self.fullyChargedPackSound = helper.addLabeledControl("Pack sound:", wx.Choice, choices=list(SOUND_PACK.values()))
+        currentFullyCharged = config.conf["BatteryChime"]["fullyChargedPackSound"]
+        self.fullyChargedPackSound.SetSelection(packIds.index(currentFullyCharged) if currentFullyCharged in packIds else 0)
+
+        fullyChargedCustomSizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.fullyChargedCustomPath = wx.TextCtrl(self, value=config.conf["BatteryChime"]["fullyChargedCustomPath"])
+        fullyChargedCustomSizer.Add(self.fullyChargedCustomPath, proportion=1)
+        self.fullyChargedBrowse = wx.Button(self, label="Browse...")
+        self.fullyChargedBrowse.Bind(wx.EVT_BUTTON, lambda e: self._onBrowse(self.fullyChargedCustomPath))
+        fullyChargedCustomSizer.Add(self.fullyChargedBrowse)
+        helper.addItem(fullyChargedCustomSizer)
+
+        self.fullyChargedPreview = helper.addItem(wx.Button(self, label="Test Fully Charged Sound"))
+        self.fullyChargedPreview.Bind(wx.EVT_BUTTON, lambda e: self._testLevel("fullyCharged"))
 
         # ── CHECK INTERVAL ──
         helper.addItem(wx.StaticText(self, label="General Settings"))
@@ -298,5 +427,21 @@ class BatteryChimeSettingsPanel(gui.settingsDialogs.SettingsPanel):
         config.conf["BatteryChime"]["emergencyMode"] = modeMap[self.emergencyMode.GetSelection()]
         config.conf["BatteryChime"]["emergencyPackSound"] = packIds[self.emergencyPackSound.GetSelection()]
         config.conf["BatteryChime"]["emergencyCustomPath"] = self.emergencyCustomPath.GetValue()
+
+        config.conf["BatteryChime"]["pluggedInEnabled"] = self.pluggedInEnabled.GetValue()
+        config.conf["BatteryChime"]["pluggedInMode"] = modeMap[self.pluggedInMode.GetSelection()]
+        config.conf["BatteryChime"]["pluggedInPackSound"] = packIds[self.pluggedInPackSound.GetSelection()]
+        config.conf["BatteryChime"]["pluggedInCustomPath"] = self.pluggedInCustomPath.GetValue()
+
+        config.conf["BatteryChime"]["unpluggedEnabled"] = self.unpluggedEnabled.GetValue()
+        config.conf["BatteryChime"]["unpluggedMode"] = modeMap[self.unpluggedMode.GetSelection()]
+        config.conf["BatteryChime"]["unpluggedPackSound"] = packIds[self.unpluggedPackSound.GetSelection()]
+        config.conf["BatteryChime"]["unpluggedCustomPath"] = self.unpluggedCustomPath.GetValue()
+
+        config.conf["BatteryChime"]["fullyChargedEnabled"] = self.fullyChargedEnabled.GetValue()
+        config.conf["BatteryChime"]["fullyChargedPercent"] = self.fullyChargedPercent.GetValue()
+        config.conf["BatteryChime"]["fullyChargedMode"] = modeMap[self.fullyChargedMode.GetSelection()]
+        config.conf["BatteryChime"]["fullyChargedPackSound"] = packIds[self.fullyChargedPackSound.GetSelection()]
+        config.conf["BatteryChime"]["fullyChargedCustomPath"] = self.fullyChargedCustomPath.GetValue()
 
         config.conf["BatteryChime"]["checkInterval"] = self.checkInterval.GetValue()
